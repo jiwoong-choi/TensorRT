@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import numpy as np
+import tensorrt as trt
 import torch
 import torch.fx
 from torch.fx.node import _get_qualified_name
@@ -30,7 +31,6 @@ from torch_tensorrt.dynamo.utils import DYNAMIC_DIM
 from torch_tensorrt.fx.observer import Observer
 from torch_tensorrt.logging import TRT_LOGGER
 
-import tensorrt as trt
 from packaging import version
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -499,7 +499,7 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                     self._output_names = output_names
                     self.weight_name_map = weight_name_map
                     _LOGGER.info(
-                        "Hit the cached TRT engine. It is loaded and skip recompilation."
+                        "Found the cached engine that corresponds to this graph. It is directly loaded."
                     )
                     # TODO: refit the engine here or outside (within convert_module)?
                     return TRTInterpreterResult(
