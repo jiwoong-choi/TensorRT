@@ -3,21 +3,12 @@ from typing import Sequence
 # @manual=//deeplearning/trt/python:py_tensorrt
 import tensorrt as trt
 
-if hasattr(trt, "__version__"):
-    TRTNetwork = trt.INetworkDefinition
-    TRTTensor = trt.tensorrt.ITensor
-    TRTLayer = trt.ILayer
-    TRTPluginFieldCollection = trt.PluginFieldCollection
-    TRTPlugin = trt.IPluginV2
-    TRTDataType = trt.DataType
-    TRTElementWiseOp = trt.ElementWiseOperation
-else:
-    TRTNetwork = "trt.INetworkDefinition"
-    TRTTensor = "trt.tensorrt.ITensor"
-    TRTLayer = "trt.ILayer"
-    TRTPluginFieldCollection = "trt.PluginFieldCollection"
-    TRTPlugin = "trt.IPluginV2"
-    TRTDataType = "trt.DataType"
-    TRTElementWiseOp = "trt.ElementWiseOperation"
+TRTNetwork = trt.INetworkDefinition
+TRTTensor = trt.ITensor
+TRTLayer = trt.ILayer
+TRTPluginFieldCollection = trt.PluginFieldCollection
+TRTPlugin = trt.IPluginV2
+TRTDataType = trt.DataType
+TRTElementWiseOp = trt.ElementWiseOperation
 
 Shape = Sequence[int]
