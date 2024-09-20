@@ -18,6 +18,7 @@ from typing import (
 )
 
 import numpy as np
+import tensorrt as trt
 import torch
 import torch.fx
 from torch.fx.node import _get_qualified_name
@@ -27,7 +28,7 @@ from torch_tensorrt._enums import dtype
 from torch_tensorrt._Input import Input
 from torch_tensorrt.dynamo import _defaults
 from torch_tensorrt.dynamo._engine_cache import BaseEngineCache
-from torch_tensorrt.dynamo._settings import CompilationSettings
+from torch_tensorrt.dynamo._settings import CompilationSettings, settings_are_compatible
 from torch_tensorrt.dynamo.conversion._ConversionContext import ConversionContext
 from torch_tensorrt.dynamo.conversion._ConverterRegistry import (
     DYNAMO_CONVERTERS as CONVERTERS,
@@ -43,7 +44,6 @@ from torch_tensorrt.dynamo.utils import DYNAMIC_DIM, get_model_device, to_torch_
 from torch_tensorrt.fx.observer import Observer
 from torch_tensorrt.logging import TRT_LOGGER
 
-import tensorrt as trt
 from packaging import version
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -89,6 +89,11 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
             self.builder.create_network(flag), compilation_settings
         )
 
+        self.compilation_settings = compilation_settings
+        if not CONVERTERS.compilation_settings:
+            # Configure user compilation settings to converters.
+            CONVERTERS.set_compilation_settings(compilation_settings)
+
         assert TRTInterpreter._all_precisions_supported(
             compilation_settings.enabled_precisions
         ), f"Attempted to enable kernel precisions that are not supported (got: {compilation_settings.enabled_precisions}, support: {_defaults.SUPPORTED_KERNEL_PRECISIONS})"
@@ -117,7 +122,6 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         self._itensor_to_tensor_meta: Dict[trt.tensorrt.ITensor, TensorMetadata] = (
             dict()
         )
-        self.compilation_settings = compilation_settings
 
         # Data types for TRT Module output Tensors
         self.output_dtypes = (
@@ -126,7 +130,7 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
         # Mapping of constants to shapes and dtypes
         self.const_mapping: Dict[str, Tuple[Sequence[int], str]] = {}
-        self.weight_name_map: Optional[dict[str, Any]] = None
+        self.weight_name_map: Optional[Dict[str, Any]] = None
 
         # Engine cache for storing and reusing TRT engines
         self.engine_cache = engine_cache
@@ -282,7 +286,7 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         if self.compilation_settings.disable_tf32:
             builder_config.clear_flag(trt.BuilderFlag.TF32)
 
-        if self.compilation_settings.make_refitable:
+        if self.compilation_settings.make_refittable:
             builder_config.set_flag(trt.BuilderFlag.REFIT)
 
         if strict_type_constraints:
@@ -533,18 +537,42 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                 self.compilation_settings.cache_built_engines
                 or self.compilation_settings.reuse_cached_engines
             ):
-                hash_val = self.engine_cache.get_hash(self.module)
+                hash_val = self.engine_cache.get_hash(
+                    self.module, self.input_specs, self.compilation_settings
+                )
 
             if self.compilation_settings.reuse_cached_engines:
                 # query the cached TRT engine
-                blob = self.engine_cache.load(hash_val)
-                if blob is not None:  # hit the cache
-                    serialized_engine, input_names, output_names, weight_name_map = (
-                        self.engine_cache.unpack(blob)
+                cached_data = self.engine_cache.check(hash_val)
+                if cached_data is not None:  # hit the cache
+                    (
+                        serialized_engine,
+                        self._input_names,
+                        self._output_names,
+                        cached_engine_input_specs,
+                        engine_compilation_settings,
+                        self.weight_name_map,
+                    ) = cached_data
+
+                    setting_compatiblity, incompattible_settings = (
+                        settings_are_compatible(
+                            self.compilation_settings, engine_compilation_settings
+                        )
                     )
-                    self._input_names = input_names
-                    self._output_names = output_names
-                    self.weight_name_map = weight_name_map
+                    assert (
+                        setting_compatiblity
+                    ), f"Attempted to refit a cached engine with incompatible settings: {incompattible_settings}, (old_settings: {engine_compilation_settings}, new_settings: {self.compilation_settings})"
+
+                    for i, e in enumerate(
+                        [
+                            Input.equivalent_spec(c, i)
+                            for c, i in zip(cached_engine_input_specs, self.input_specs)
+                        ]
+                    ):
+                        assert (
+                            e
+                        ), f"Attempted to refit a cached engine built for a different input size (input: {i}, cached size: {cached_engine_input_specs[i]}, new size: {self.input_specs[i]}"
+
                     _LOGGER.info(
                         "Found the cached engine that corresponds to this graph. It is directly loaded."
                     )
@@ -581,7 +609,7 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
         self._construct_trt_network_def()
 
-        if self.compilation_settings.make_refitable:
+        if self.compilation_settings.make_refittable:
             self._save_weight_mapping()
 
         build_engine_start_time = datetime.now()
@@ -612,13 +640,17 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
             self.engine_cache is not None
             and self.compilation_settings.cache_built_engines
         ):
-            blob = self.engine_cache.pack(
-                serialized_engine,
-                self._input_names,
-                self._output_names,
-                self.weight_name_map,
+            self.engine_cache.insert(
+                hash_val,
+                (
+                    serialized_engine,
+                    self._input_names,
+                    self._output_names,
+                    self.input_specs,
+                    self.compilation_settings,
+                    self.weight_name_map,
+                ),
             )
-            self.engine_cache.save(hash_val, blob)
 
         with io.BytesIO() as engine_bytes:
             engine_bytes.write(serialized_engine)
